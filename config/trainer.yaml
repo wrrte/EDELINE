@@ -52,7 +52,7 @@ training:
   should: True
   num_final_epochs: 50
   cache_in_ram: True
-  num_workers_data_loaders: 0
+  num_workers_data_loaders: 8
   model_free: False # if True, turn off world_model training and RL in imagination
   compile_wm: True
 

@@ -24,7 +24,16 @@ class Episode:
         return Episode(**d, info=merge_info(self.info, other.info))
 
     def to(self, device) -> Episode:
-        return Episode(**{k: v.to(device) if k != "info" else v for k, v in self.__dict__.items()})
+        def _to(x):
+            if isinstance(x, torch.Tensor):
+                return x.to(device)
+            elif isinstance(x, dict):
+                return {k: _to(v) for k, v in x.items()}
+            elif isinstance(x, list):
+                return [_to(v) for v in x]
+            return x
+
+        return Episode(**{k: v.to(device) if k != "info" else _to(v) for k, v in self.__dict__.items()})
 
     @property
     def dead(self) -> torch.ByteTensor:

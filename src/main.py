@@ -10,6 +10,11 @@ OmegaConf.register_new_resolver("eval", eval)
 
 @hydra.main(config_path="../config", config_name="trainer", version_base="1.3")
 def main(cfg: DictConfig):
+    import torch.multiprocessing as mp
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
     run(cfg)
 
 
