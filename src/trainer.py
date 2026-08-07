@@ -48,6 +48,11 @@ class Trainer(StateDictMixin):
         set_seed(cfg.common.seed)
 
         # Init wandb
+        wandb_key_path = Path(".wandb_api_key")
+        if wandb_key_path.exists():
+            with open(wandb_key_path, "r") as f:
+                wandb.login(key=f.read().strip())
+                
         try_until_no_except(
             partial(wandb.init, config=OmegaConf.to_container(cfg, resolve=True), reinit=True, resume=True, **cfg.wandb)
         )

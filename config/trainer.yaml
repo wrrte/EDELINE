@@ -8,8 +8,8 @@ hydra:
     chdir: True
 
 wandb:
-  mode: disabled
-  project: null
+  mode: online
+  project: EDELINE
   entity: null
   name: null 
   group: null
