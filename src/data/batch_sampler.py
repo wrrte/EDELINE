@@ -26,6 +26,11 @@ class BatchSampler(torch.utils.data.Sampler):
         self.batch_size = batch_size
         self.seq_length = seq_length
         self.can_sample_beyond_end = can_sample_beyond_end
+        self._priority_queue: List[SegmentId] = []
+
+    def push_priority_segments(self, segment_ids: List[SegmentId]) -> None:
+        """Register segments to be sampled with priority (e.g., from retrieval)."""
+        self._priority_queue.extend(segment_ids)
 
     def __len__(self):
         raise NotImplementedError
@@ -35,6 +40,21 @@ class BatchSampler(torch.utils.data.Sampler):
             yield self.sample()
 
     def sample(self) -> List[SegmentId]:
+        # Consume priority segments first
+        priority_batch: List[SegmentId] = []
+        while self._priority_queue and len(priority_batch) < self.batch_size:
+            priority_batch.append(self._priority_queue.pop(0))
+
+        remaining = self.batch_size - len(priority_batch)
+        if remaining > 0:
+            random_batch = self._sample_random(remaining)
+        else:
+            random_batch = []
+
+        return priority_batch + random_batch
+
+    def _sample_random(self, count: int) -> List[SegmentId]:
+        """Sample `count` random segments from the dataset (original logic)."""
         num_episodes = self.dataset.num_episodes
 
         if (self.sample_weights is None) or num_episodes < len(self.sample_weights):
@@ -49,7 +69,7 @@ class BatchSampler(torch.utils.data.Sampler):
             ]
             weights = [w / s for (w, s) in zip(weights, sizes) for _ in range(s)]
 
-        episode_ids = np.random.choice(np.arange(num_episodes), size=self.batch_size, replace=True, p=weights)
+        episode_ids = np.random.choice(np.arange(num_episodes), size=count, replace=True, p=weights)
         timesteps = np.random.randint(low=0, high=self.dataset.lengths[episode_ids])
 
         # padding allowed, both before start and after end
@@ -65,3 +85,4 @@ class BatchSampler(torch.utils.data.Sampler):
             starts = stops - self.seq_length
 
         return [SegmentId(*x) for x in zip(episode_ids, starts, stops)]
+

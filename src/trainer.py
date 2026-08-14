@@ -15,6 +15,7 @@ from tqdm import tqdm, trange
 import wandb
 
 from agent import Agent
+from edeline_retrieval import EDELINERetrievalManager
 from coroutines.collector import make_collector, NumToCollect
 from data import BatchSampler, collate_segments_to_batch, Dataset, DatasetTraverser
 from envs import make_env, WorldModelEnv
@@ -164,6 +165,7 @@ class Trainer(StateDictMixin):
             c = cfg.actor_critic.training
             sl = cfg.agent.world_model.denoiser.inner_model.num_steps_conditioning
             bs = BatchSampler(self.train_dataset, c.batch_size, sl, c.sample_weights)
+            self._ac_batch_sampler = bs  # store reference for retrieval injection
             dl_actor_critic = make_data_loader(batch_sampler=bs)
             wm_env_cfg = instantiate(cfg.world_model_env)
             rl_env = WorldModelEnv(self.agent.world_model, dl_actor_critic, wm_env_cfg)
@@ -176,6 +178,21 @@ class Trainer(StateDictMixin):
         sigma_distribution_cfg = instantiate(cfg.denoiser.sigma_distribution)
         actor_critic_loss_cfg = instantiate(cfg.actor_critic.actor_critic_loss)
         self.agent.setup_training(sigma_distribution_cfg, actor_critic_loss_cfg, rl_env)
+
+        # Retrieval setup
+        retrieval_cfg = OmegaConf.to_container(cfg.retrieval, resolve=True) if hasattr(cfg, 'retrieval') else {}
+        if retrieval_cfg.get('enable', False):
+            enc_cfg = cfg.agent.world_model.recurrent_embedding_module
+            img_size = enc_cfg.img_size
+            total_down = sum(enc_cfg.down)
+            spatial = img_size // (2 ** total_down)
+            latent_dim = enc_cfg.channels[-1] * spatial * spatial
+            self.retrieval_manager = EDELINERetrievalManager(
+                config=retrieval_cfg, latent_dim=latent_dim, device=str(self._device)
+            )
+            print(f"[Retrieval] Enabled. latent_dim={latent_dim}, hash_bits={retrieval_cfg.get('hash_bits', 10)}")
+        else:
+            self.retrieval_manager = None
 
         # Training state (things to be saved/restored)
         self.epoch = 0
@@ -204,6 +221,12 @@ class Trainer(StateDictMixin):
                 self.num_epochs_collect, to_log_ = self.collect_initial_dataset()
                 to_log += to_log_
 
+            # Build initial hash index after first collection
+            if self.retrieval_manager is not None and self.train_dataset.num_episodes > 0:
+                self.retrieval_manager.build_hash_index(
+                    self.train_dataset, self.agent.world_model, self._device
+                )
+
         num_epochs = self.num_epochs_collect + self._cfg.training.num_final_epochs
 
         while self.epoch < num_epochs:
@@ -221,8 +244,24 @@ class Trainer(StateDictMixin):
                 c = self._cfg.collection.train
                 to_log += self._train_collector.send(NumToCollect(steps=c.steps_per_epoch))
 
+                # Incrementally index new episodes
+                if self.retrieval_manager is not None:
+                    self.retrieval_manager.update_new_episodes(
+                        self.train_dataset, self.agent.world_model, self._device
+                    )
+
             if self._cfg.training.should:
                 to_log += self.train_agent()
+
+            # Periodic global rebuild (PCA update + rehash)
+            if (self.retrieval_manager is not None
+                    and self.retrieval_manager.enabled
+                    and self.epoch % self.retrieval_manager.global_rebuild_every == 0
+                    and self.train_dataset.num_episodes > 0):
+                self.retrieval_manager.rebuild_hash_index(
+                    self.train_dataset, self.agent.world_model, self._device
+                )
+                to_log.append({"retrieval/global_rebuild": 1.0})
 
             # Evaluation
             should_test = self._cfg.evaluation.should and (self.epoch % self._cfg.evaluation.every == 0)
@@ -318,8 +357,36 @@ class Trainer(StateDictMixin):
             cfg = getattr(self._cfg, name).training
             if self.epoch > cfg.start_after_epochs:
                 steps = cfg.steps_first_epoch if self.epoch == 1 else cfg.steps_per_epoch
+
+                if name == "actor_critic" and self.retrieval_manager is not None:
+                    # Inject retrieved segments before actor-critic training
+                    self._inject_retrieved_segments()
+
                 to_log += self.train_component(name, steps)
         return to_log
+
+    def _inject_retrieved_segments(self) -> None:
+        """Retrieve similar segments and push them to the AC BatchSampler's priority queue."""
+        if self.retrieval_manager is None or not self.retrieval_manager.enabled:
+            return
+        if not hasattr(self, '_ac_batch_sampler'):
+            return
+
+        is_warmup = self.epoch <= self.retrieval_manager.warmup_epochs
+        if is_warmup:
+            return
+
+        sl = self._cfg.agent.world_model.denoiser.inner_model.num_steps_conditioning
+        retrieved_ids = self.retrieval_manager.retrieve_segments(
+            self.train_dataset,
+            context_length=sl,
+            world_model=self.agent.world_model,
+            device=self._device,
+        )
+
+        if retrieved_ids:
+            self._ac_batch_sampler.push_priority_segments(retrieved_ids)
+            print(f"[Retrieval] Injected {len(retrieved_ids)} segments into AC BatchSampler")
 
     @torch.no_grad()
     def test_agent(self) -> Logs:
@@ -346,10 +413,43 @@ class Trainer(StateDictMixin):
 
         num_steps = cfg.grad_acc_steps * steps
 
+        # Retrieval: determine if we should trigger anchors during WM training
+        should_trigger = (
+            name == "world_model"
+            and self.retrieval_manager is not None
+            and self.retrieval_manager.enabled
+        )
+        is_retrieval_warmup = self.epoch <= self.retrieval_manager.warmup_epochs if should_trigger else True
+        total_triggered = 0
+
         for i in trange(num_steps, desc=f"Training {name}"):
             batch = next(data_iterator).to(self._device) if data_iterator is not None else None
             loss, metrics = model.compute_loss(batch) if batch is not None else model.compute_loss()
             loss.backward()
+
+            # Retrieval: TD-error based anchor triggering during WM training
+            if should_trigger and batch is not None:
+                with torch.no_grad():
+                    ac = self.agent.actor_critic
+                    b, t, c, h, w = batch.obs.shape
+                    hx = torch.zeros(b, ac.lstm_dim, device=self._device)
+                    cx = torch.zeros(b, ac.lstm_dim, device=self._device)
+                    values = []
+                    for ti in range(t):
+                        _, val, (hx, cx) = ac(batch.obs[:, ti], (hx, cx))
+                        values.append(val)
+                    values = torch.stack(values, dim=1)  # (B, T)
+
+                    num_trig = self.retrieval_manager.add_batch_transitions(
+                        values=values,
+                        rewards=batch.rew,
+                        ends=batch.end,
+                        gamma=self._cfg.actor_critic.actor_critic_loss.gamma,
+                        segment_ids=batch.segment_ids,
+                        mask=batch.mask_padding,
+                        is_warmup=is_retrieval_warmup,
+                    )
+                    total_triggered += num_trig
 
             num_batch = self.num_batch_train.get(name)
             metrics[f"num_batch_train_{name}"] = num_batch
@@ -368,6 +468,16 @@ class Trainer(StateDictMixin):
                     lr_sched.step()
 
             to_log.append(metrics)
+
+        # Log retrieval stats
+        if should_trigger:
+            to_log.append({
+                "retrieval/triggered_anchors_epoch": total_triggered,
+                "retrieval/active_anchors_queue": len(self.retrieval_manager.active_anchors),
+                "retrieval/td_error_ema_mean": self.retrieval_manager.ema_mean,
+                "retrieval/td_error_ema_var": self.retrieval_manager.ema_var,
+                "retrieval/num_hash_buckets": len(self.retrieval_manager.hash_memory),
+            })
 
         process_confusion_matrices_if_any_and_compute_classification_metrics(to_log)
         to_log = [{f"{name}/train/{k}": v for k, v in d.items()} for d in to_log]

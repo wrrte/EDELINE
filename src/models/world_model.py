@@ -59,4 +59,19 @@ class WorldModel(nn.Module):
 
 
         return loss, metrics
+
+    @torch.no_grad()
+    def encode_obs_for_hash(self, obs):
+        """
+        Encode observations using only the RecurrentEmbeddingEncoder (CNN, pre-Mamba)
+        for hash indexing.
+        
+        Args:
+            obs: (N, C, H, W) tensor of observations in [-1, 1]
+        
+        Returns:
+            (N, latent_dim) flattened feature tensor
+        """
+        return self.recurrent_emb.encoder(obs).flatten(start_dim=1)
+
     
