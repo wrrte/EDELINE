@@ -129,16 +129,16 @@ actor_critic:
     eps: 1e-8
 
 retrieval:
-  enable: False
+  enable: True
   hash_bits: 10
   use_pca: True
   max_pca_samples: 100000
   trigger_mode: "z_score"
   z_score_threshold: 3.5
-  anchor_offset: -2
+  anchor_offset: 0
   ema_alpha: 0.01
-  max_bucket_size: 1000000000
-  warmup_epochs: 5
+  max_bucket_size: 100000
+  warmup_epochs: 15
   max_anchors: 16
   multiplier: 16
   target: 16

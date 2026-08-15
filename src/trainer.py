@@ -54,8 +54,17 @@ class Trainer(StateDictMixin):
             with open(wandb_key_path, "r") as f:
                 wandb.login(key=f.read().strip())
                 
+        wandb_kwargs = dict(cfg.wandb)
+        if wandb_kwargs.get("name") is None:
+            game_name = cfg.env.train.id.split("NoFrameskip")[0]
+            wandb_id = wandb.util.generate_id()
+            retrieval_flag = "O" if cfg.retrieval.enable else "X"
+            wandb_kwargs["name"] = f"{game_name}_{wandb_id}_{cfg.common.seed}_{retrieval_flag}"
+            wandb_kwargs["id"] = wandb_id
+            cfg.wandb.name = wandb_kwargs["name"]
+                
         try_until_no_except(
-            partial(wandb.init, config=OmegaConf.to_container(cfg, resolve=True), reinit=True, resume=True, **cfg.wandb)
+            partial(wandb.init, config=OmegaConf.to_container(cfg, resolve=True), reinit=True, resume=True, **wandb_kwargs)
         )
 
         # Flags
