@@ -13,6 +13,7 @@ def main(cfg: DictConfig):
     import torch.multiprocessing as mp
     try:
         mp.set_start_method('spawn', force=True)
+        mp.set_sharing_strategy('file_system')
     except RuntimeError:
         pass
     run(cfg)
