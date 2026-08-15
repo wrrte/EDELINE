@@ -141,7 +141,7 @@ retrieval:
   warmup_epochs: 15
   max_anchors: 16
   multiplier: 16
-  target: 16
+  target: 4
   max_contexts: 256
   global_rebuild_every: 10
 

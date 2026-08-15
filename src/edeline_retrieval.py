@@ -397,7 +397,7 @@ class EDELINERetrievalManager:
         context_length: int,
         world_model,
         device,
-    ) -> List[SegmentId]:
+    ) -> Tuple[List[SegmentId], int]:
         """
         Pop anchors from the queue, find similar segments via hash lookup,
         and return SegmentId objects for BatchSampler injection.
@@ -409,10 +409,10 @@ class EDELINERetrievalManager:
             device: Torch device
         
         Returns:
-            List of SegmentId objects to be prioritized in BatchSampler
+            Tuple of (List of SegmentId objects to be prioritized, Number of anchors added)
         """
         if not self.enabled or len(self.active_anchors) == 0:
-            return []
+            return [], 0
 
         popped_anchors = []
         for _ in range(min(self.max_anchors, len(self.active_anchors))):
@@ -420,6 +420,7 @@ class EDELINERetrievalManager:
 
         result_segment_ids = []
         total_retrieved = 0
+        num_anchors_added = 0
 
         for (anchor_ep, anchor_ts), anchor_key in popped_anchors:
             if total_retrieved >= self.max_contexts:
@@ -462,6 +463,7 @@ class EDELINERetrievalManager:
 
             # Build segment IDs: anchor first, then matched candidates
             all_matches = [(anchor_ep, anchor_ts)] + valid_candidates
+            is_first = True
             for (ep_id, ts) in all_matches:
                 if total_retrieved >= self.max_contexts:
                     break
@@ -480,9 +482,12 @@ class EDELINERetrievalManager:
 
                 seg_id = SegmentId(episode_id=ep_id, start=start, stop=stop)
                 result_segment_ids.append(seg_id)
+                if is_first:
+                    num_anchors_added += 1
+                    is_first = False
                 total_retrieved += 1
 
-        return result_segment_ids
+        return result_segment_ids, num_anchors_added
 
     def state_dict(self) -> dict:
         """Save retrieval manager state for checkpointing."""

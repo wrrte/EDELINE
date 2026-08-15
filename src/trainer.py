@@ -369,24 +369,28 @@ class Trainer(StateDictMixin):
 
                 if name == "actor_critic" and self.retrieval_manager is not None:
                     # Inject retrieved segments before actor-critic training
-                    self._inject_retrieved_segments()
+                    total_injected, num_anchors = self._inject_retrieved_segments()
+                    if total_injected > 0:
+                        extra_segments = total_injected - num_anchors
+                        extra_batches = (extra_segments + cfg.batch_size - 1) // cfg.batch_size
+                        steps += extra_batches
 
                 to_log += self.train_component(name, steps)
         return to_log
 
-    def _inject_retrieved_segments(self) -> None:
+    def _inject_retrieved_segments(self) -> tuple[int, int]:
         """Retrieve similar segments and push them to the AC BatchSampler's priority queue."""
         if self.retrieval_manager is None or not self.retrieval_manager.enabled:
-            return
+            return 0, 0
         if not hasattr(self, '_ac_batch_sampler'):
-            return
+            return 0, 0
 
         is_warmup = self.epoch <= self.retrieval_manager.warmup_epochs
         if is_warmup:
-            return
+            return 0, 0
 
         sl = self._cfg.agent.world_model.denoiser.inner_model.num_steps_conditioning
-        retrieved_ids = self.retrieval_manager.retrieve_segments(
+        retrieved_ids, num_anchors = self.retrieval_manager.retrieve_segments(
             self.train_dataset,
             context_length=sl,
             world_model=self.agent.world_model,
@@ -396,6 +400,9 @@ class Trainer(StateDictMixin):
         if retrieved_ids:
             self._ac_batch_sampler.push_priority_segments(retrieved_ids)
             print(f"[Retrieval] Injected {len(retrieved_ids)} segments into AC BatchSampler")
+            return len(retrieved_ids), num_anchors
+        
+        return 0, 0
 
     @torch.no_grad()
     def test_agent(self) -> Logs:
@@ -431,7 +438,8 @@ class Trainer(StateDictMixin):
         is_retrieval_warmup = self.epoch <= self.retrieval_manager.warmup_epochs if should_trigger else True
         total_triggered = 0
 
-        for i in trange(num_steps, desc=f"Training {name}"):
+        pbar = trange(num_steps, desc=f"Training {name}")
+        for i in pbar:
             batch = next(data_iterator).to(self._device) if data_iterator is not None else None
             loss, metrics = model.compute_loss(batch) if batch is not None else model.compute_loss()
             loss.backward()
@@ -459,6 +467,10 @@ class Trainer(StateDictMixin):
                         is_warmup=is_retrieval_warmup,
                     )
                     total_triggered += num_trig
+                    pbar.set_postfix({
+                        "anchors": total_triggered,
+                        "expected_total": total_triggered * self.retrieval_manager.target
+                    })
 
             num_batch = self.num_batch_train.get(name)
             metrics[f"num_batch_train_{name}"] = num_batch
