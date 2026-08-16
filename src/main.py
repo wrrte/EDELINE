@@ -22,6 +22,10 @@ def main(cfg: DictConfig):
         mp.set_start_method('spawn', force=True)
     except RuntimeError:
         pass
+    try:
+        mp.set_sharing_strategy('file_system')
+    except RuntimeError:
+        pass
     run(cfg)
 
 
