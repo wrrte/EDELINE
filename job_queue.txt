@@ -1,9 +1,3 @@
-
-python src/main.py env.train.id=AmidarNoFrameskip-v4 common.seed=6000 training.num_workers_data_loaders=4 retrieval.enable=False
 python src/main.py env.train.id=BattleZoneNoFrameskip-v4 common.seed=6000 training.num_workers_data_loaders=4 retrieval.enable=False
 python src/main.py env.train.id=QbertNoFrameskip-v4 common.seed=6000 training.num_workers_data_loaders=4 retrieval.enable=False
 python src/main.py env.train.id=SeaquestNoFrameskip-v4 common.seed=6000 training.num_workers_data_loaders=4 retrieval.enable=False
-
-
-
-
